@@ -1,136 +1,145 @@
 #!/usr/bin/python3
-import pwd
+import os
 import time
 import docker
-import argparse
-import threading
 import subprocess
 from flask_cors import CORS
-import xml.etree.ElementTree as ET
-from flask import Flask, jsonify, render_template, request
+from nvitop import Device
+from flask import Flask, jsonify, render_template
 
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
-process_list = None
-gpu_status = None
-gpu_status_history = []
-mutex_process_list = threading.Lock()
-mutex_gpu_status = threading.Lock()
-mutex_gpu_status_history = threading.Lock()
-gpu_number = -1
 
 
-def get_gpu_number():
-    """获取GPU的数量"""
-    nvidia_smi_xml = nvidia_smi()
-    return len(nvidia_smi_xml.findall("gpu"))
+pid_cache = {}
+all_devices = Device.all()
+gpu_number = len(all_devices)
+docker_client = docker.from_env()
+if os.path.exists('/sys/fs/cgroup/cgroup.controllers'):
+    cgroup_version = 'v2'
+else:
+    cgroup_version = 'v1'
 
 
-def owner(pid):
-    '''返回进程所属的用户名'''
+def pid2container(pid):
+    global cgroup_version, docker_client
+    # v1
+    # $ cat /proc/[PID]/cgroup
+    # 12:devices:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 11:cpuset:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 10:hugetlb:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 9:blkio:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 8:perf_event:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 7:net_cls,net_prio:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 6:rdma:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 5:memory:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 4:freezer:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 3:cpu,cpuacct:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 2:pids:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 1:name=systemd:/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    # 0::/docker/955227b75e228e25f22e1fea884d293a28bfe417be6ce39d99d05bf88c09ffe3
+    #
+    # v2
+    # /proc/[PID]/cgroup
+    # 0::/system.slice/docker-fe9730ee647b428d03df83e0b93137eb56d14053d9c141d2696c534b1c9db76a.scope
     try:
-        for ln in open(f"/proc/{pid}/status"):
-            if ln.startswith('Uid:'):
-                uid = int(ln.split()[1])
-                return pwd.getpwuid(uid).pw_name
-    except FileNotFoundError:
-        return ""
+        with open(f"/proc/{pid}/cgroup", 'r') as f:
+            cgroup_content = f.read()
+    except:
+        return None
+
+    container_id = None
+    if cgroup_version == 'v1':
+        for line in cgroup_content.split("\n"):
+            if 'docker' in line:
+                container_id = line.split("/")[-1]
+                break
+    else:
+        for line in cgroup_content.split("\n"):
+            if 'docker' in line:
+                container_id = line.split("docker-")[-1].split(".")[0]
+                break
+
+    if container_id:
+        return docker_client.containers.get(container_id).name
+    return None
 
 
-def nvidia_smi():
-    """执行nvidia-smi -q -x命令获取返回的xml文本"""
-    xml = subprocess.check_output(['nvidia-smi', '-q', '-x'])
-    return ET.fromstring(xml)
-
-
-def get_process_list(nvidia_smi_xml):
+def get_process_list():
     """获取进程列表"""
-    pid_to_container = {}
-    client = docker.from_env()
-    for c in client.containers.list():
-        processes = c.top().get("Processes")
-        for p in processes:
-            pid_to_container[p[1]] = c.name
+    global pid_cache
     processes = []
-    for gpu_id, gpu in enumerate(nvidia_smi_xml.findall("gpu")):
-        for process_info in gpu.findall(".//process_info"):
-            pid = process_info.find("pid").text
-            if pid in pid_to_container:
-                user = f"{pid_to_container[pid]}"
-                process_type = "container"   # 容器里面的进程
+    new_pid_cache = {}
+
+    for device in all_devices:
+        device_processes = device.processes()
+        for process in device_processes.values():
+            if process.type == "G":  # 不处理图形化进程，例如 Xorg
+                continue
+            try:                     # 捕获所有可能的异常，主要是 host.ZombieProcess
+                process_snapshot = process.as_snapshot()
+            except:
+                continue
+            pid = process_snapshot.pid
+            pid_cache_item = pid_cache.get(pid)
+            if pid_cache_item:
+                type = pid_cache_item['type']
+                username = pid_cache_item['username']
             else:
-                user = f"{owner(pid)}"
-                process_type = "host"        # 宿主机进程
+                container_name = pid2container(pid)
+                if container_name:
+                    type = "container"
+                    username = container_name
+                else:
+                    type = "host"
+                    username = process_snapshot.username
+            new_pid_cache[pid] = {
+                "type": type,
+                "username": username
+            }
+
             process = {
-                "GPU": gpu_id,
-                "PID": pid,
-                "Process Name": process_info.find("process_name").text,
-                "GPU Memory Usage": process_info.find("used_memory").text,
-                "Type": process_type,
-                "User": user,
+                "device_idx": device.index,
+                "gpu_memory": process_snapshot.gpu_memory // (1024 * 1024),  # bytes to MiB
+                "gpu_memory_human": process_snapshot.gpu_memory_human,
+                "gpu_memory_percent": process_snapshot.gpu_memory_percent,
+                "gpu_sm_utilization": process_snapshot.gpu_sm_utilization,
+
+                "pid": process_snapshot.pid,
+                "name": process_snapshot.name,
+                "command": process_snapshot.command,
+                "cpu_percent": process_snapshot.cpu_percent,
+                "host_memory": process_snapshot.host_memory // (1024 * 1024),  # bytes to MiB
+                "host_memory_human": process_snapshot.host_memory_human,
+                "memory_percent": process_snapshot.memory_percent,
+                "running_time_in_seconds": process_snapshot.running_time_in_seconds,
+                "running_time_human": process_snapshot.running_time_human,
+
+                "type": type,
+                "username": username,
             }
             processes.append(process)
+
+    pid_cache = new_pid_cache
     return processes
 
 
-def get_gpu_status(nvidia_smi_xml):
+def get_gpu_status():
     """获取显卡状态：温度、显存占用、显卡占用、功耗等"""
     status_list = []
-    for gpu_id, gpu in enumerate(nvidia_smi_xml.findall("gpu")):
+    for device in all_devices:
         status_list.append({
-            # "gpu_id": gpu_id,
-            # "product_name": gpu.find("product_name").text,
-            "fan-speed": int(gpu.find("fan_speed").text.split()[0]),
-            # "memory_total": int(gpu.find("fb_memory_usage/total").text.split()[0]),
-            "memory-used": int(gpu.find("fb_memory_usage/used").text.split()[0]),
-            "utilization": int(gpu.find("utilization/gpu_util").text.split()[0]),
-            "temperature": int(gpu.find("temperature/gpu_temp").text.split()[0]),
-            # "power_limit": float(gpu.find("power_readings/power_limit").text.split()[0]),
-            "power-draw": float(gpu.find("power_readings/power_draw").text.split()[0]),
-            # "power_state": gpu.find("power_readings/power_state").text,
-            # "process_number": len(gpu.findall(".//process_info")),
+            "memory_used": device.memory_used() // (1024 * 1024), # bytes to MiB
+            "gpu_utilization": device.gpu_utilization(),
+            "temperature": device.temperature(),
+            "power_usage": device.power_usage() / 1000.0,  # mW to W
         })
     data = {
-        "timestamp": int(round(time.time())) * 1000,  # 将秒级时间戳转为毫秒级
-        # "driver_version": nvidia_smi_xml.find("driver_version").text,
-        # "cuda_version": nvidia_smi_xml.find("cuda_version").text,
-        # "attached_gpus": int(nvidia_smi_xml.find("attached_gpus").text),
+        "timestamp": int(round(time.time())) * 1000,
         "status": status_list
     }
     return data
-
-
-def refresh():
-    """每间隔一定时间获取一次信息"""
-    global process_list
-    global gpu_status
-    global gpu_status_history
-    one_hour = 60 * 60 * 1000  # 一小时的毫秒数
-    while True:
-        nvidia_smi_xml = nvidia_smi()
-        # 刷新GPU状态
-        gpu_status_temp = get_gpu_status(nvidia_smi_xml)
-        mutex_gpu_status.acquire()
-        gpu_status = gpu_status_temp
-        mutex_gpu_status.release()
-        # 刷新GPU状态历史列表
-        mutex_gpu_status_history.acquire()
-        if len(gpu_status_history) > 0 and gpu_status_history[-1]["timestamp"] == gpu_status_temp["timestamp"]:
-            gpu_status_history[-1] = gpu_status_temp
-        else:
-            gpu_status_history.append(gpu_status_temp)
-            # 只保留一个小时的历史
-            while True:
-                if gpu_status_history[-1]["timestamp"] - gpu_status_history[0]["timestamp"] > one_hour:
-                    gpu_status_history = gpu_status_history[1:]
-                else:
-                    break
-        mutex_gpu_status_history.release()
-        # 刷新进程列表
-        mutex_process_list.acquire()
-        process_list = get_process_list(nvidia_smi_xml)
-        mutex_process_list.release()
 
 
 @app.route("/")
@@ -139,75 +148,25 @@ def api_index_html():
     return render_template("index.html")
 
 
-@app.route("/smi.html")
-def api_smi_html():
-    return render_template("smi.html")
-
-
 @app.route("/process.html")
 def api_process_html():
     return render_template("process.html")
 
 
-@app.route("/system.html")
-def api_system_html():
-    return render_template("system.html")
-
-
-@app.route("/nvidia-smi")
-def api_nvidia_smi():
-    return subprocess.check_output(['nvidia-smi'])
-
-
-@app.route("/neofetch")
-def api_neofetch():
-    return subprocess.check_output(['neofetch', '--stdout']).strip()
-
-
-@app.route("/journalctl")
-def api_journalctl():
-    param = request.args.get("param", "")
-    return subprocess.check_output(["journalctl"] + param.split() + ['--no-pager'])
-
-
 @app.route("/process")
 def api_process():
-    mutex_process_list.acquire()
-    temp = process_list
-    mutex_process_list.release()
-    return jsonify(temp)
+    return jsonify(get_process_list())
 
 
 @app.route("/status")
 def api_status():
-    mutex_gpu_status.acquire()
-    temp = gpu_status
-    mutex_gpu_status.release()
-    return jsonify(temp)
-
-
-@app.route("/status-history")
-def api_status_history():
-    mutex_gpu_status_history.acquire()
-    temp = gpu_status_history
-    mutex_gpu_status_history.release()
-    return jsonify(temp)
+    return jsonify(get_gpu_status())
 
 
 @app.route("/gpu-number")
 def api_gpu_number():
-    global gpu_number
-    if gpu_number < 0:
-        gpu_number = get_gpu_number()
     return str(gpu_number)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("GPU Moniter")
-    parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=12345)
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-
-    threading.Thread(target=refresh).start()
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    app.run()

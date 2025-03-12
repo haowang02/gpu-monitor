@@ -8,6 +8,18 @@
     <title>GPU状态监控 - 进程监控</title>
     <link rel="stylesheet" href="/static/css/bootstrap.min.css">
     <link rel="icon" href="/static/favicon.ico">
+    <!-- 添加 CSS 样式 -->
+    <style>
+        table {
+            table-layout: fixed; /* 固定表格布局 */
+            width: 100%; /* 表格宽度占满容器 */
+        }
+        .command-cell {
+            white-space: nowrap; /* 防止换行 */
+            overflow: hidden; /* 隐藏溢出内容 */
+            text-overflow: ellipsis; /* 显示省略号 */
+        }
+    </style>
 </head>
 
 <body>
@@ -19,12 +31,6 @@
             </li>
             <li class="active">
                 <a href="/process.html">进程监控</a>
-            </li>
-            <li>
-                <a href="/smi.html">nvidia-smi</a>
-            </li>
-            <li>
-                <a href="/system.html">系统信息</a>
             </li>
         </ul>
         <div style="margin-top: 1em;">
@@ -39,36 +45,64 @@
     <script src="/static/js/bootstrap.min.js"></script>
     <script>
         $(function () {
+            // 定义转义函数，用于处理 title 属性中的双引号
+            function escapeAttribute(value) {
+                return value.replace(/"/g, '&quot;');
+            }
+
             function query() {
                 $.ajax({
                     url: "/process",
                     type: "get",
                     timeout: 5000,
                     success: function (data) {
-                        let tbody = `<tr>
-                                        <th>GPU</th>
-                                        <th>进程号(PID)</th>
-                                        <th>进程名称</th>
-                                        <th>显存占用</th>
-                                        <th>类型</th>
-                                        <th>用户名</th>
-                                      </tr>`;
+                        // 生成表格内容，包括 colgroup 和表头
+                        let tableContent = `
+                            <colgroup>
+                                <col style="width: 30px;">  <!-- GPU -->
+                                <col style="width: 70px;">  <!-- PID -->
+                                <col style="width: 70px;"> <!-- TYPE -->
+                                <col style="width: 70px;"> <!-- USER -->
+                                <col style="width: 90px;"> <!-- GPU-MEM -->
+                                <col style="width: 90px;"> <!-- MEM -->
+                                <col style="width: 70px;">  <!-- %CPU -->
+                                <col style="width: 90px;"> <!-- TIME -->
+                                <col style="width: 300px;"> <!-- COMMAND -->
+                            </colgroup>
+                            <tr>
+                                <th>#</th>
+                                <th>PID</th>
+                                <th>TYPE</th>
+                                <th>USER</th>
+                                <th>GPU-MEM</th>
+                                <th>MEM</th>
+                                <th>%CPU</th>
+                                <th>TIME</th>
+                                <th>COMMAND</th>
+                            </tr>`;
+                        // 遍历数据生成表格行
                         for (let i = 0; i < data.length; i++) {
-                            tbody += `<tr>
-                                        <td>${data[i]["GPU"]}</td>
-                                        <td>${data[i]["PID"]}</td>
-                                        <td>${data[i]["Process Name"]}</td>
-                                        <td>${data[i]["GPU Memory Usage"]}</td>
-                                        <td>${data[i]["Type"]}</td>
-                                        <td>${data[i]["User"]}</td>
-                                       </tr>`;
+                            let command = data[i]["command"];
+                            let escapedCommand = escapeAttribute(command); // 转义命令中的双引号
+                            tableContent += `
+                                <tr>
+                                    <td>${data[i]["device_idx"]}</td>
+                                    <td>${data[i]["pid"]}</td>
+                                    <td>${data[i]["type"]}</td>
+                                    <td>${data[i]["username"]}</td>
+                                    <td>${data[i]["gpu_memory_human"]}</td>
+                                    <td>${data[i]["host_memory_human"]}</td>
+                                    <td>${data[i]["cpu_percent"]}</td>
+                                    <td>${data[i]["running_time_human"]}</td>
+                                    <td class="command-cell" title="${escapedCommand}">${command}</td>
+                                </tr>`;
                         }
-                        $("table").html(tbody);
+                        $("table").html(tableContent);
                     },
                 });
             }
 
-            const interval = 3;  // 刷新间隔
+            const interval = 3; // 刷新间隔
             let countDown = interval;
             function refresh() {
                 countDown--;

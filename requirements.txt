@@ -1,3 +1,5 @@
 docker
 Flask
 Flask-Cors
+nvitop
+gunicorn

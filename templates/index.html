@@ -2,207 +2,233 @@
 <html lang="zh-CN">
 
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GPU状态监控 - 状态监控</title>
-  <link rel="stylesheet" href="/static/css/bootstrap.min.css">
-  <link rel="icon" href="/static/favicon.ico">
-  <style>
-    .card {
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      padding: 5px;
-    }
-    .row {
-      margin-top: 1em;
-    }
-    .left {
-      padding-right: 7px;
-    }
-    .right {
-      padding-left: 7px;
-    }
-  </style>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GPU状态监控 - 状态监控</title>
+    <link rel="stylesheet" href="/static/css/bootstrap.min.css">
+    <link rel="icon" href="/static/favicon.ico">
+    <style>
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 5px;
+        }
+
+        .row {
+            margin-top: 1em;
+        }
+    </style>
+    <!-- Chart.js 和日期适配器 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 </head>
 
 <body>
-  <div class="container">
-    <h2 style="text-align: center;">GPU状态监控</h2>
-    <ul class="nav nav-tabs">
-      <li class="active">
-        <a href="/index.html">状态监控</a>
-      </li>
-      <li>
-        <a href="/process.html">进程监控</a>
-      </li>
-      <li>
-        <a href="/smi.html">nvidia-smi</a>
-      </li>
-      <li>
-        <a href="/system.html">系统信息</a>
-      </li>
-    </ul>
-    <div class="row">
-      <div class="col-md-6 col-sm-12 left">
-        <div class="card">
-          <div id="memory-used" style="width: 100%; height: 300px;"></div>
+    <div class="container">
+        <h2 style="text-align: center;">GPU状态监控</h2>
+        <ul class="nav nav-tabs">
+            <li class="active">
+                <a href="/index.html">状态监控</a>
+            </li>
+            <li>
+                <a href="/process.html">进程监控</a>
+            </li>
+        </ul>
+        <div class="row">
+            <div id="gpu_selector" class="col-md-12">
+                选择显示的GPU：
+                <label class="checkbox-inline">
+                    <input type="checkbox" id="inlineCheckbox1" value="option1" checked> 1
+                </label>
+                <label class="checkbox-inline">
+                    <input type="checkbox" id="inlineCheckbox2" value="option2"> 2
+                </label>
+                <label class="checkbox-inline">
+                    <input type="checkbox" id="inlineCheckbox3" value="option3"> 3
+                </label>
+            </div>
         </div>
-      </div>
-      <div class="col-md-6 col-sm-12 right">
-        <div class="card">
-          <div id="utilization" style="width: 100%; height: 300px;"></div>
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <canvas id="memory_used" style="width: 100%; height: 300px;"></canvas>
+                </div>
+            </div>
         </div>
-      </div>
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <canvas id="gpu_utilization" style="width: 100%; height: 300px;"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <canvas id="temperature" style="width: 100%; height: 300px;"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <canvas id="power_usage" style="width: 100%; height: 300px;"></canvas>
+                </div>
+            </div>
+        </div>
     </div>
-    <div class="row">
-      <div class="col-md-6 col-sm-12 left">
-        <div class="card">
-          <div id="temperature" style="width: 100%; height: 300px;"></div>
-        </div>
-      </div>
-      <div class="col-md-6 col-sm-12 right">
-        <div class="card">
-          <div id="fan-speed" style="width: 100%; height: 300px;"></div>
-        </div>
-      </div>
-    </div>
-    <div class="row">
-      <div class="col-md-12">
-        <div class="card">
-          <div id="power-draw" style="width: 100%; height: 300px;"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <script src="/static/js/jquery-1.12.4.min.js"></script>
-  <script src="/static/js/bootstrap.min.js"></script>
-  <script src="/static/js/echarts.min.js"></script>
-  <script>
-    $(function () {
-      const longest = 60 * 60 * 1000;  // 历史长度
-      const interval = 2;              // 刷新间隔
-      const chartList = [
-        { id: "memory-used", title: "显存占用 (MB)" },
-        { id: "utilization", title: "显卡占用 (%)" },
-        { id: "temperature", title: "显卡温度 (℃)" },
-        { id: "fan-speed", title: "风扇转速 (%)" },
-        { id: "power-draw", title: "显卡功耗 (W)" },
-      ];
-      $.ajax({
-        url: "/gpu-number",
-        type: "get",
-        cache: false,
-        success: function (data) {
-          const gpuNumber = parseInt(data);
-          chartList.forEach(value => {
-            // 根据GPU的个数生成legend和series
-            const legend = [];
-            const series = [];
-            for (let i = 0; i < gpuNumber; i++) {
-              legend.push(`GPU${i}`);
-              series.push({
-                name: `GPU${i}`,
-                type: "line",
-                data: [],
-                symbol: 'none',
-              });
-            }
-            value.option = {
-              title: {
-                text: value.title
-              },
-              tooltip: {
-                trigger: "axis"
-              },
-              legend: {
-                data: legend
-              },
-              grid: {
-                left: "1%",
-                right: "2%",
-                bottom: "1%",
-                containLabel: true
-              },
-              xAxis: {
-                type: "time",
-                splitLine: {
-                  show: false
-                }
-              },
-              yAxis: {
-                type: "value"
-              },
-              series: series
-            };
-            value.chart = echarts.init(document.getElementById(value.id));
-            value.chart.setOption(value.option);
-            value.chart.showLoading();  // 显示加载动画
-          });
-          getHistory();
-        },
-      });
+    <script src="/static/js/jquery-1.12.4.min.js"></script>
+    <script src="/static/js/bootstrap.min.js"></script>
+    <script>
+        $(function () {
+            // 设置时间窗口为 5 分钟
+            const longest = 5 * 60 * 1000;  // 5 分钟（单位：毫秒）
+            const interval = 1;             // 刷新间隔：1 秒
+            const chartList = [
+                { id: "memory_used", title: "显存占用 (MB)", chart: null },
+                { id: "gpu_utilization", title: "显卡占用 (%)", chart: null },
+                { id: "temperature", title: "显卡温度 (℃)", chart: null },
+                { id: "power_usage", title: "显卡功耗 (W)", chart: null },
+            ];
 
-      function refreshChart() {
-        chartList.forEach(c => {
-          c.chart.hideLoading();  // 隐藏加载动画
-          c.chart.setOption(c.option);
-          c.option.series.forEach(s => {
-            // 删除超过历史长度的数据
-            while (true) {
-              if (s.data[s.data.length - 1].timestamp - s.data[0].timestamp > longest) s.data.shift();
-              else break;
-            }
-          });
-          c.chart.setOption(c.option);
-        });
-      }
+            // 获取 GPU 数量并初始化图表
+            $.ajax({
+                url: "/gpu-number",
+                type: "get",
+                cache: false,
+                success: function (data) {
+                    const gpuNumber = parseInt(data);
 
-      function query() {
-        $.ajax({
-          url: "/status",
-          type: "get",
-          success: function (gpuStatus) {
-            let date = new Date(gpuStatus.timestamp);
-            gpuStatus.status.forEach((value, index) => {
-              chartList.forEach(c => {
-                c.option.series[index].data.push({
-                  value: [date, value[c.id]],
-                  timestamp: gpuStatus.timestamp
-                })
-              });
+                    // 生成GPU选择器
+                    gpu_selector_html = '选择显示的GPU：'
+                    for (let i = 0; i < gpuNumber; i++) {
+                        gpu_selector_html += `<label class="checkbox-inline">
+                            <input type="checkbox" id="gpu_checkbox_${i}" value="option${i}" checked> GPU${i}
+                        </label>`
+                    }
+                    document.getElementById('gpu_selector').innerHTML = gpu_selector_html;
+
+                    const now = new Date();
+                    const initialMin = new Date(now.getTime() - longest);
+
+                    chartList.forEach(c => {
+                        const ctx = document.getElementById(c.id).getContext('2d');
+                        const datasets = [];
+                        for (let i = 0; i < gpuNumber; i++) {
+                            datasets.push({
+                                label: `GPU${i}`,
+                                data: [],
+                                fill: false,
+                                pointRadius: 0,
+                                tension: 0.2,      // 减小平滑程度
+                                borderWidth: 2     // 减小线条粗细
+                            });
+                        }
+                        c.chart = new Chart(ctx, {
+                            type: 'line',
+                            data: {
+                                datasets: datasets
+                            },
+                            options: {
+                                scales: {
+                                    x: {
+                                        type: 'time',
+                                        time: {
+                                            unit: 'second'
+                                        },
+                                        min: initialMin,
+                                        max: now,
+                                        ticks: {
+                                            display: false
+                                        },
+                                        grid: {
+                                            display: false
+                                        }
+                                    },
+                                    y: {
+                                        beginAtZero: false,
+                                        grid: {
+                                            display: true
+                                        }
+                                    }
+                                },
+                                interaction: {
+                                    mode: 'index',
+                                    intersect: false
+                                },
+                                plugins: {
+                                    legend: {
+                                        display: true
+                                    },
+                                    title: {
+                                        display: true,
+                                        text: c.title
+                                    }
+                                }
+                            }
+                        });
+                    });
+
+                    // 开始查询数据
+                    query();
+                    setInterval(() => {
+                        query();
+                    }, interval * 1000);
+
+
+                    // 监听GPU选择器的变化
+                    const checkboxes = document.querySelectorAll('#gpu_selector input[type="checkbox"]');
+                    checkboxes.forEach(checkbox => {
+                        checkbox.addEventListener('change', () => {
+                            const gpuIndex = parseInt(checkbox.getAttribute('id').split('_')[2]);
+                            const isHidden = !checkbox.checked;
+                            chartList.forEach(c => {
+                                c.chart.data.datasets[gpuIndex].hidden = isHidden;
+                                c.chart.update(0); // 无动画更新
+                            });
+                        });
+                    });
+                },
             });
-            refreshChart();
-          },
-        });
-      }
 
-      function getHistory() {
-        $.ajax({
-          url: "/status-history",
-          type: "get",
-          cache: false,
-          success: function (data) {
-            data.forEach(gpuStatus => {
-              let date = new Date(gpuStatus.timestamp);
-              gpuStatus.status.forEach((value, index) => {
-                chartList.forEach(c => {
-                  c.option.series[index].data.push({
-                    value: [date, value[c.id]],
-                    timestamp: gpuStatus.timestamp
-                  })
+            // 查询 GPU 状态并更新图表
+            function query() {
+                $.ajax({
+                    url: "/status",
+                    type: "get",
+                    success: function (gpuStatus) {
+                        const timestamp = new Date(gpuStatus.timestamp);
+                        gpuStatus.status.forEach((value, index) => {
+                            chartList.forEach(c => {
+                                const dataset = c.chart.data.datasets[index];
+                                dataset.data.push({
+                                    x: timestamp,
+                                    y: value[c.id]
+                                });
+                            });
+                        });
+
+                        // 计算 5 分钟窗口的最小时间
+                        const minTime = new Date(timestamp.getTime() - longest);
+
+                        // 更新每个图表的 X 轴范围并移除超期数据
+                        chartList.forEach(c => {
+                            c.chart.options.scales.x.min = minTime;
+                            c.chart.options.scales.x.max = timestamp;
+                            c.chart.data.datasets.forEach(dataset => {
+                                while (dataset.data.length > 0 && dataset.data[0].x < minTime) {
+                                    dataset.data.shift();  // 移除早于 minTime 的数据
+                                }
+                            });
+                            c.chart.update('none');  // 更新图表以应用更改
+                        });
+                    },
                 });
-              });
-            });
-            refreshChart();
-            setInterval(() => {
-              query();
-            }, interval * 1000);
-          },
+            }
         });
-      }
-    });
-  </script>
+    </script>
 </body>
 
 </html>
